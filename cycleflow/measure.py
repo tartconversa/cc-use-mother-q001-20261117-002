@@ -44,8 +44,12 @@ class MeasurementRules:
         if passed + failed != job["quantity"]:
             raise DomainError("sample_mismatch", "tested units must equal job quantity")
         plan = self.get_plan(plan_id)
-        if plan["product"] != job["design"]["product"] or plan["revision"] != job["design"]["revision"]:
+        effective = job["effective_design"]
+        if plan["product"] != effective["product"] or plan["revision"] != effective["revision"]:
             raise DomainError("plan_mismatch", "plan must match exact design revision")
+        active = job["active_disposition"]
+        if active and occurred_at < active["occurred_at"]:
+            raise DomainError("time_order", "test precedes the active disposition decision")
         if occurred_at < max(plan["effective_at"], job["completed_at"]):
             raise DomainError("time_order", "test precedes plan or integration finish")
         rate = Decimal(passed) / Decimal(job["quantity"])

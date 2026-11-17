@@ -58,7 +58,7 @@ class DesignRules:
             raise DomainError("already_retired", "design already retired")
         if occurred_at < design["released_at"]:
             raise DomainError("time_order", "retirement precedes release")
-        open_jobs = self.db.execute("SELECT COUNT(*) FROM jobs WHERE design_id=? AND status NOT IN ('completed','scrapped')",
+        open_jobs = self.db.execute("SELECT COUNT(*) FROM jobs WHERE effective_design_id=? AND status NOT IN ('completed','scrapped')",
                                     (design_id,)).fetchone()[0]
         if open_jobs:
             raise DomainError("active_jobs", "cannot retire design with open jobs")

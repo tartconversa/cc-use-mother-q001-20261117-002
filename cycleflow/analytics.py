@@ -28,7 +28,10 @@ class CycleAnalytics:
                 "SELECT design_id,revision,parent_id,released_at,state FROM designs WHERE product=? ORDER BY revision",
                 (product,))]
             jobs = [dict(row) for row in db.execute(
-                "SELECT j.*,d.revision FROM jobs j JOIN designs d ON j.design_id=d.design_id WHERE d.product=? AND j.opened_at>=? AND j.opened_at<? ORDER BY j.opened_at,j.job_id",
+                "SELECT j.*,d.revision,od.revision AS opened_revision FROM jobs j"
+                " JOIN designs d ON j.effective_design_id=d.design_id"
+                " JOIN designs od ON j.design_id=od.design_id"
+                " WHERE od.product=? AND j.opened_at>=? AND j.opened_at<? ORDER BY j.opened_at,j.job_id",
                 (product, start, end))]
             job_ids = [row["job_id"] for row in jobs]
             steps = defaultdict(list)
@@ -55,11 +58,13 @@ class CycleAnalytics:
             revisions = self._revisions(jobs, steps, tests, lots)
             job_details = [self._job_detail(job, steps[job["job_id"]], tests[job["job_id"]],
                                             lots[job["job_id"]]) for job in jobs]
-            quality = self._quality(jobs, steps, tests, events, design_rows, start, end)
+            impact = self._revision_impact(db, product, jobs)
+            quality = self._quality(jobs, steps, tests, events, design_rows, start, end, impact)
             summary = self._summary(jobs, tests, job_details)
             report = {"product": product, "window_start": start, "window_end": end,
                       "source_head": head, "designs": design_rows, "summary": summary,
                       "revisions": revisions, "jobs": job_details, "quality": quality,
+                      "revision_impact": impact,
                       "source_event_ids": sorted(source_events)}
             report["fingerprint"] = fingerprint(report)
             return report
@@ -83,7 +88,9 @@ class CycleAnalytics:
                          "tested_at": test["tested_at"], "passed": test["passed"],
                          "failed": test["failed"], "source_event_id": test["event_id"]} for test in tests]
         return {"job_id": job["job_id"], "design_id": job["design_id"],
-                "revision": job["revision"], "quantity": job["quantity"],
+                "effective_design_id": job["effective_design_id"],
+                "revision": job["revision"], "opened_revision": job["opened_revision"],
+                "quantity": job["quantity"],
                 "status": job["status"], "opened_at": job["opened_at"],
                 "completed_at": completed, "parent_job": job["parent_job"],
                 "failure_reason": job["failure_reason"], "stages": stages,
@@ -126,7 +133,58 @@ class CycleAnalytics:
                            "supplier_units": dict(sorted(group["suppliers"].items()))})
         return result
 
-    def _quality(self, jobs, steps, tests, events, designs, start, end):
+    def _revision_impact(self, db, product, jobs):
+        job_by_id = {job["job_id"]: job for job in jobs}
+        effects = []
+        scoped = defaultdict(list)
+        for row in db.execute(
+            "SELECT e.*,d.revision FROM revision_effects e JOIN designs d ON d.design_id=e.design_id"
+            " WHERE d.product=? ORDER BY e.effective_at,e.design_id", (product,)):
+            in_window = [item["job_id"] for item in db.execute(
+                "SELECT job_id FROM effect_scopes WHERE design_id=? ORDER BY job_id",
+                (row["design_id"],)) if item["job_id"] in job_by_id]
+            if not in_window:
+                continue
+            for job_id in in_window:
+                scoped[job_id].append(row["design_id"])
+            effects.append({"design_id": row["design_id"], "revision": row["revision"],
+                            "effective_at": row["effective_at"], "note": row["note"],
+                            "source_event_id": row["event_id"], "scope_job_ids": in_window})
+        entries = []
+        for job_id in sorted(scoped):
+            job = job_by_id[job_id]
+            history = [dict(item) for item in db.execute(
+                "SELECT * FROM dispositions WHERE job_id=? ORDER BY id", (job_id,))]
+            active = next((item for item in reversed(history) if item["withdrawn_at"] is None), None)
+            if active and active["decision"] == "upgrade":
+                classification = "upgraded"
+            elif active or job["status"] in ("completed", "failed", "scrapped"):
+                classification = "continued"
+            else:
+                classification = "pending"
+            entries.append({
+                "job_id": job_id, "status": job["status"],
+                "opened_revision": job["opened_revision"], "current_revision": job["revision"],
+                "classification": classification, "scopes": sorted(scoped[job_id]),
+                "decision": active["decision"] if active else None,
+                "decision_design_id": active["design_id"] if active else None,
+                "reason": active["reason"] if active else None,
+                "decided_at": active["occurred_at"] if active else None,
+                "decision_event_id": active["event_id"] if active else None,
+                "history": [{"decision": item["decision"], "design_id": item["design_id"],
+                             "reason": item["reason"], "occurred_at": item["occurred_at"],
+                             "event_id": item["event_id"], "withdrawn_at": item["withdrawn_at"],
+                             "withdrawn_event_id": item["withdrawn_event_id"],
+                             "withdraw_reason": item["withdraw_reason"]} for item in history]})
+        by_job = {entry["job_id"]: entry for entry in entries}
+        for effect in effects:
+            outcomes = {"upgraded": 0, "continued": 0, "pending": 0}
+            for job_id in effect["scope_job_ids"]:
+                outcomes[by_job[job_id]["classification"]] += 1
+            effect["outcomes"] = outcomes
+        return {"effects": effects, "jobs": entries}
+
+    def _quality(self, jobs, steps, tests, events, designs, start, end, impact):
         issues = []
         for job in jobs:
             job_id = job["job_id"]
@@ -145,6 +203,10 @@ class CycleAnalytics:
             if start <= event["occurred_at"] < end:
                 issues.append({"code": "unresolved_event", "subject": str(event["id"]),
                                "reason": event["error_code"]})
+        for entry in impact["jobs"]:
+            if entry["classification"] == "pending":
+                issues.append({"code": "pending_disposition", "subject": entry["job_id"],
+                               "reason": "in revision scope without an active disposition"})
         if not designs:
             issues.append({"code": "unknown_product", "subject": "product"})
         return {"publishable": not issues, "issue_count": len(issues), "issues": issues}

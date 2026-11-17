@@ -28,6 +28,8 @@ def parser():
     capacity.add_argument("at")
     timeline = sub.add_parser("timeline")
     timeline.add_argument("job_id")
+    effect = sub.add_parser("effect")
+    effect.add_argument("design_id")
     report = sub.add_parser("report")
     report.add_argument("product")
     report.add_argument("start")
@@ -65,6 +67,8 @@ def main(argv=None):
             result = service.capacity(args.design_id, args.quantity, args.at)
         elif args.command == "timeline":
             result = service.job_timeline(args.job_id)
+        elif args.command == "effect":
+            result = service.get_effect(args.design_id)
         elif args.command == "report":
             result = service.report(args.product, args.start, args.end)
         elif args.command == "publish":

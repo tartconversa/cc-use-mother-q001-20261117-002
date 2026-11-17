@@ -6,12 +6,14 @@ from .design import DesignRules
 from .execution import ExecutionRules
 from .inventory import InventoryRules
 from .measure import MeasurementRules
+from .revision import RevisionRules
 
 
 KINDS = {
     "design.release", "design.retire", "lot.receive", "lot.quarantine",
     "job.open", "job.stage_start", "job.stage_finish", "job.scrap",
     "plan.create", "test.record",
+    "revision.effect", "revision.disposition", "revision.withdraw",
 }
 
 
@@ -66,6 +68,8 @@ class EventLedger:
                 detail = InventoryRules(db).dispatch(kind, payload, row["occurred_at"])
             elif kind.startswith("job."):
                 detail = ExecutionRules(db).dispatch(kind, payload, row["occurred_at"], event_id)
+            elif kind.startswith("revision."):
+                detail = RevisionRules(db).dispatch(kind, payload, row["occurred_at"], event_id)
             else:
                 detail = MeasurementRules(db).dispatch(kind, payload, row["occurred_at"], event_id)
             db.execute("RELEASE SAVEPOINT project_event")

@@ -1,6 +1,7 @@
 from .contracts import DomainError, MissingDependency, duration_seconds, keys, nonnegative_int, required_text
 from .design import DesignRules
 from .inventory import InventoryRules
+from .revision import RevisionRules
 
 
 STAGES = ("machining", "assembly", "integration")
@@ -33,8 +34,9 @@ class ExecutionRules:
                 raise DomainError("invalid_rework", "rework must stay in same product")
             if occurred_at < parent["opened_at"]:
                 raise DomainError("time_order", "rework precedes original job")
-        self.db.execute("INSERT INTO jobs(job_id,design_id,quantity,opened_at,status,parent_job) VALUES(?,?,?,?,?,?)",
-                        (job_id, design_id, quantity, occurred_at, "open", parent_id))
+        self.db.execute("INSERT INTO jobs(job_id,design_id,quantity,opened_at,status,parent_job,effective_design_id)"
+                        " VALUES(?,?,?,?,?,?,?)",
+                        (job_id, design_id, quantity, occurred_at, "open", parent_id, design_id))
         allocations = self.inventory.reserve(job_id, design, quantity, occurred_at)
         return {"job_id": job_id, "status": "open", "allocations": allocations}
 
@@ -102,6 +104,11 @@ class ExecutionRules:
             raise MissingDependency("job", job_id)
         result = dict(row)
         result["design"] = self.designs.get(result["design_id"])
+        result["effective_design"] = self.designs.get(result["effective_design_id"])
+        dispositions = RevisionRules(self.db).for_job(job_id)
+        result["dispositions"] = dispositions
+        result["active_disposition"] = next(
+            (item for item in reversed(dispositions) if item["withdrawn_at"] is None), None)
         result["reservations"] = self.inventory.reservations(job_id)
         result["stages"] = [dict(r) for r in self.db.execute(
             "SELECT stage,started_at,completed_at,event_id FROM job_steps WHERE job_id=? ORDER BY started_at,stage", (job_id,))]

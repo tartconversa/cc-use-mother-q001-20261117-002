@@ -22,6 +22,8 @@ class IntegrityAudit:
             findings.extend(self._lot_checks(db))
             findings.extend(self._job_checks(db, product))
             findings.extend(self._test_checks(db, product))
+            findings.extend(self._effect_checks(db, product))
+            findings.extend(self._disposition_checks(db, product))
             findings.extend(self._release_checks(db, product))
             findings.sort(key=lambda item: (item["code"], item["subject"]))
             return {"product": product, "checked_event_head": db.execute(
@@ -121,7 +123,7 @@ class IntegrityAudit:
     def _test_checks(self, db, product):
         findings = []
         sql = ("SELECT t.*,j.quantity,j.status,j.design_id,d.product,d.revision FROM tests t"
-               " JOIN jobs j ON j.job_id=t.job_id JOIN designs d ON d.design_id=j.design_id" +
+               " JOIN jobs j ON j.job_id=t.job_id JOIN designs d ON d.design_id=j.effective_design_id" +
                (" WHERE d.product=?" if product else "") + " ORDER BY t.test_id")
         for test in db.execute(sql, (product,) if product else ()):
             subject = test["test_id"]
@@ -132,6 +134,52 @@ class IntegrityAudit:
                 findings.append(self._issue("test_plan_revision", subject))
             if test["status"] not in ("completed", "failed"):
                 findings.append(self._issue("test_job_status", subject))
+        return findings
+
+    def _effect_checks(self, db, product):
+        findings = []
+        sql = ("SELECT e.*,d.product,d.revision,d.released_at FROM revision_effects e"
+               " JOIN designs d ON d.design_id=e.design_id" +
+               (" WHERE d.product=?" if product else "") + " ORDER BY e.design_id")
+        for effect in db.execute(sql, (product,) if product else ()):
+            subject = effect["design_id"]
+            if effect["effective_at"] < effect["released_at"]:
+                findings.append(self._issue("effect_before_release", subject))
+            for scope in db.execute("SELECT * FROM effect_scopes WHERE design_id=?", (subject,)):
+                job = db.execute(
+                    "SELECT j.status,d.product,d.revision FROM jobs j"
+                    " JOIN designs d ON d.design_id=j.design_id WHERE j.job_id=?",
+                    (scope["job_id"],)).fetchone()
+                if job is None:
+                    findings.append(self._issue("scope_job_missing", f"{subject}/{scope['job_id']}"))
+                    continue
+                if job["product"] != effect["product"] or job["revision"] >= effect["revision"]:
+                    findings.append(self._issue("scope_revision", f"{subject}/{scope['job_id']}"))
+        return findings
+
+    def _disposition_checks(self, db, product):
+        findings = []
+        sql = ("SELECT j.* FROM jobs j JOIN designs d ON d.design_id=j.design_id" +
+               (" WHERE d.product=?" if product else "") + " ORDER BY j.job_id")
+        for job in db.execute(sql, (product,) if product else ()):
+            job_id = job["job_id"]
+            rows = list(db.execute("SELECT * FROM dispositions WHERE job_id=? ORDER BY id", (job_id,)))
+            active = [row for row in rows if row["withdrawn_at"] is None]
+            if len(active) > 1:
+                findings.append(self._issue("multiple_active_dispositions", job_id))
+            for row in rows:
+                linked = (row["withdrawn_at"] is None) == (row["withdrawn_event_id"] is None)
+                if not linked:
+                    findings.append(self._issue("withdrawal_link", f"{job_id}/{row['id']}"))
+                scope = db.execute("SELECT 1 FROM effect_scopes WHERE design_id=? AND job_id=?",
+                                   (row["design_id"], job_id)).fetchone()
+                if scope is None:
+                    findings.append(self._issue("effect_scope_missing", f"{job_id}/{row['design_id']}"))
+            expected = job["design_id"]
+            if active and active[0]["decision"] == "upgrade":
+                expected = active[0]["design_id"]
+            if job["effective_design_id"] != expected:
+                findings.append(self._issue("effective_design_mismatch", job_id))
         return findings
 
     def _release_checks(self, db, product):

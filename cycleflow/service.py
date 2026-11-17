@@ -8,6 +8,7 @@ from .execution import ExecutionRules
 from .inventory import InventoryRules
 from .ledger import EventLedger
 from .measure import MeasurementRules
+from .revision import RevisionRules
 from .snapshot import ReportShelf
 from .storage import Store
 from .throughput import ThroughputView
@@ -63,6 +64,10 @@ class CycleService:
     def get_test(self, test_id):
         with self.store.read() as db:
             return MeasurementRules(db).trace(test_id)
+
+    def get_effect(self, design_id):
+        with self.store.read() as db:
+            return RevisionRules(db).get_effect(design_id)
 
     def get_event(self, event_id):
         return self.ledger.get(event_id)

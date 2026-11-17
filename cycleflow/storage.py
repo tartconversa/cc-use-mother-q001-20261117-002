@@ -29,7 +29,7 @@ CREATE TABLE IF NOT EXISTS jobs (
   job_id TEXT PRIMARY KEY, design_id TEXT NOT NULL REFERENCES designs(design_id),
   quantity INTEGER NOT NULL CHECK(quantity>0), opened_at TEXT NOT NULL,
   status TEXT NOT NULL, completed_at TEXT, parent_job TEXT REFERENCES jobs(job_id),
-  failure_reason TEXT);
+  failure_reason TEXT, effective_design_id TEXT REFERENCES designs(design_id));
 CREATE TABLE IF NOT EXISTS reservations (
   job_id TEXT NOT NULL REFERENCES jobs(job_id), lot_id TEXT NOT NULL REFERENCES lots(lot_id),
   quantity INTEGER NOT NULL CHECK(quantity>0), PRIMARY KEY(job_id, lot_id));
@@ -46,6 +46,21 @@ CREATE TABLE IF NOT EXISTS tests (
   plan_id TEXT NOT NULL REFERENCES plans(plan_id), tested_at TEXT NOT NULL,
   passed INTEGER NOT NULL, failed INTEGER NOT NULL, note TEXT NOT NULL,
   event_id INTEGER NOT NULL REFERENCES events(id));
+CREATE TABLE IF NOT EXISTS revision_effects (
+  design_id TEXT PRIMARY KEY REFERENCES designs(design_id),
+  effective_at TEXT NOT NULL, note TEXT NOT NULL DEFAULT '',
+  event_id INTEGER NOT NULL REFERENCES events(id));
+CREATE TABLE IF NOT EXISTS effect_scopes (
+  design_id TEXT NOT NULL REFERENCES revision_effects(design_id),
+  job_id TEXT NOT NULL REFERENCES jobs(job_id), PRIMARY KEY(design_id, job_id));
+CREATE TABLE IF NOT EXISTS dispositions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, job_id TEXT NOT NULL REFERENCES jobs(job_id),
+  design_id TEXT NOT NULL REFERENCES designs(design_id), decision TEXT NOT NULL,
+  reason TEXT NOT NULL, occurred_at TEXT NOT NULL,
+  event_id INTEGER NOT NULL REFERENCES events(id),
+  withdrawn_at TEXT, withdrawn_event_id INTEGER REFERENCES events(id),
+  withdraw_reason TEXT);
+CREATE INDEX IF NOT EXISTS ix_dispositions_job ON dispositions(job_id, id);
 CREATE TABLE IF NOT EXISTS releases (
   release_id TEXT PRIMARY KEY, product TEXT NOT NULL, window_start TEXT NOT NULL,
   window_end TEXT NOT NULL, created_at TEXT NOT NULL, report TEXT NOT NULL,
@@ -64,8 +79,16 @@ class Store:
         db = self.connect()
         try:
             db.executescript(SCHEMA)
+            self._migrate(db)
         finally:
             db.close()
+
+    @staticmethod
+    def _migrate(db):
+        columns = {row[1] for row in db.execute("PRAGMA table_info(jobs)")}
+        if "effective_design_id" not in columns:
+            db.execute("ALTER TABLE jobs ADD COLUMN effective_design_id TEXT")
+            db.execute("UPDATE jobs SET effective_design_id=design_id")
 
     def connect(self):
         db = sqlite3.connect(self.path, timeout=15, isolation_level=None)
